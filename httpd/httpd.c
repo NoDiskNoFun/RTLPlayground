@@ -9,6 +9,7 @@
 #include "timer.h"
 #include "sessions.h"
 #include "html_data.h"
+#include "api.h"
 
 // #define DEBUG
 #include "debug.h"
@@ -60,6 +61,7 @@ __xdata uint8_t config_buf[CONFIG_UPLOAD_BUF];
 __xdata uint16_t pre_acc;
 __xdata uint8_t * __xdata content_type = 0;
 __xdata uint8_t * __xdata session = 0;
+__xdata uint8_t * __xdata auth_value = 0;	/* Authorization header, API only */
 __xdata uint16_t content_length;
 
 // Global variables holding POST state
@@ -106,8 +108,10 @@ void httpd_init(void) __banked
 	uip_listen(HTONS(80));
 	// Not through uip_conn: it only points at a connection while uIP is
 	// handling one, and nothing has set it yet at init time.
-	for (uint8_t i = 0; i < UIP_CONNS; i++)
+	for (uint8_t i = 0; i < UIP_CONNS; i++) {
 		uip_conns[i].appstate.tstate = TSTATE_CLOSED;
+		uip_conns[i].appstate.via_api = 0;
+	}
 	session_init();
 }
 
@@ -285,6 +289,18 @@ void send_length_required(void)
 }
 
 
+static void send_method_not_allowed(void)
+{
+	slen = strtox(outbuf, "HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+}
+
+
+static void send_bearer_unauthorized(void)
+{
+	slen = strtox(outbuf, "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+}
+
+
 void send_ok(void)
 {
 	slen = strtox(outbuf, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
@@ -298,6 +314,7 @@ __xdata uint8_t *scan_header(__xdata uint8_t * __xdata p)
 	content_type = 0;
 	content_length = 0;
 	session = 0;
+	auth_value = 0;
 	authenticated = 0;
 
 	while (!strstart(p, "\r\n\r\n")) {
@@ -310,6 +327,8 @@ __xdata uint8_t *scan_header(__xdata uint8_t * __xdata p)
 		else if ((v = header_value(p, "\ncontent-length:"))) {
 			parse_short(v);
 			content_length = short_parsed;
+		} else if ((v = header_value(p, "\nauthorization:"))) {
+			auth_value = v;
 		} else if ((v = header_value(p, "\ncookie:"))) {
 			/* Scan for the "session" key: the header may hold several
 			 * cookies in any order. Match "session" not "session=" -
@@ -860,6 +879,87 @@ void handle_post(uint16_t body_off)
 }
 
 
+/*
+ * The JSON pages that only read the switch state. These are all a client in
+ * the API VLAN can reach; the pages that change something (l2_del.json,
+ * cmd_log_clear, reset), the configuration and the command log are not here.
+ * Returns 1 if q named one of them and the response is in outbuf.
+ */
+static uint8_t send_readonly_json(__xdata uint8_t *q)
+{
+	if (!strcmp(q, "/ports.json")) {
+		send_ports();
+	} else if (!strcmp(q, "/traffic.json")) {
+		send_traffic();
+	} else if (!strcmp(q, "/information.json")) {
+		send_basic_info();
+	} else if (!strcmp(q, "/vlan.json")) {
+		parse_short(q + 15);
+		send_vlan(short_parsed);
+	} else if (is_word(q, "/counters.json")) {
+		if (send_counters(q[20] - '0'))
+			send_bad_request();
+	} else if (is_word(q, "/eee.json")) {
+		send_eee();
+	} else if (is_word(q, "/bandwidth.json")) {
+		send_bandwidth();
+	} else if (is_word(q, "/storm.json")) {
+		send_storm();
+	} else if (is_word(q, "/l2.json")) {
+		parse_short(q + 13); // e.g.: /l2.json?idx=10
+		send_l2(short_parsed);
+	} else if (is_word(q, "/mirror.json")) {
+		send_mirror();
+	} else if (is_word(q, "/isolation.json")) {
+		send_isolation();
+	} else if (is_word(q, "/lag.json")) {
+		send_lag();
+	} else if (is_word(q, "/stp.json")) {
+		send_stp();
+	} else if (is_word(q, "/lldp.json")) {
+		send_lldp();
+	} else if (is_word(q, "/stpcnt.json")) {
+		send_stp_counters();
+	} else if (is_word(q, "/vlanlist.json")) {
+		send_vlanlist();
+	} else {
+		return 0;
+	}
+	return 1;
+}
+
+
+/*
+ * A request that came in through the API VLAN, header complete in config_buf.
+ * GET only, a valid bearer token, and only the read-only JSON pages: no web
+ * pages, no login, no commands, no uploads. A session cookie means nothing
+ * here.
+ */
+static void api_request(void)
+{
+	__xdata uint8_t * __xdata p = config_buf;
+	__xdata uint8_t * __xdata q;
+
+	if (!is_word(p, "GET")) {
+		send_method_not_allowed();
+		return;
+	}
+	p += 4;
+	scan_header(p);
+	authenticated = 0;
+	q = p;
+	while (*p && !is_separator(*p))
+		p++;
+	*p = NUL;
+	if (!auth_value || !api_token_check(auth_value)) {
+		send_bearer_unauthorized();
+		return;
+	}
+	if (!send_readonly_json(q))
+		send_not_found();
+}
+
+
 static void tx_send(uint16_t len)
 {
 	sent_len = len;
@@ -882,6 +982,12 @@ void httpd_appcall(void)
 		dbg_string("Connected...\n");
 		s->tstate = TSTATE_NONE;
 		s->fw_reset_pending = 0; // explicitly initialize reused XDATA appstate
+		s->via_api = api_ctx;
+	} else if (s->via_api != api_ctx) {
+		// A segment for this connection from the other side of the
+		// API/management divide: never mix the two
+		uip_abort();
+		s->tstate = TSTATE_CLOSED;
 	} else if (uip_closed()) {
 		dbg_string("Connection closed\n");
 		s->tstate = TSTATE_CLOSED;
@@ -983,6 +1089,12 @@ void httpd_appcall(void)
 				goto do_send;
 		}
 
+		if (s->via_api) {
+			s->tstate = TSTATE_NONE;
+			api_request();
+			goto do_send;
+		}
+
 		if (s->tstate == TSTATE_MULTIPART || s->tstate == TSTATE_POSTBODY
 		    || is_word(config_buf, "POST")) {
 			handle_post(body_off);
@@ -1020,45 +1132,11 @@ void httpd_appcall(void)
 				goto do_send;
 			}
 			dbg_string("Not file entry\n");
-			if (!strcmp(q, "/ports.json")) {
-				send_ports();
-			} else if (!strcmp(q, "/traffic.json")) {
-				send_traffic();
-			} else if (!strcmp(q, "/information.json")) {
-				send_basic_info();
-			} else if (!strcmp(q, "/vlan.json")) {
-				parse_short(q + 15);
-				send_vlan(short_parsed);
-			} else if (is_word(q, "/counters.json")) {
-				uint8_t cport = q[20] - '0';
-				if (send_counters(cport))
-					send_bad_request();
-			} else if (is_word(q, "/eee.json")) {
-				send_eee();
-			} else if (is_word(q, "/bandwidth.json")) {
-				send_bandwidth();
-			} else if (is_word(q, "/storm.json")) {
-				send_storm();
-			} else if (is_word(q, "/l2.json")) {
-				parse_short(q + 13); // e.g.: /l2.json?idx=10
-				send_l2(short_parsed);
+			if (send_readonly_json(q)) {
+				// served
 			} else if (is_word(q, "/l2_del.json")) {
 				parse_short(q + 17);
 				l2_delete(short_parsed);
-			} else if (is_word(q, "/mirror.json")) {
-				send_mirror();
-			} else if (is_word(q, "/isolation.json")) {
-				send_isolation();
-			} else if (is_word(q, "/lag.json")) {
-				send_lag();
-			} else if (is_word(q, "/stp.json")) {
-				send_stp();
-			} else if (is_word(q, "/lldp.json")) {
-				send_lldp();
-			} else if (is_word(q, "/stpcnt.json")) {
-				send_stp_counters();
-			} else if (is_word(q, "/vlanlist.json")) {
-				send_vlanlist();
 			} else if (is_word(q, "/config")) {
 				send_config();
 			} else if (is_word(q, "/cmd_log")) {

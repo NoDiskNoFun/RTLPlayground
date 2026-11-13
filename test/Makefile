@@ -34,7 +34,8 @@ TESTS = $(BUILDDIR)/test_cmd_editor \
         $(BUILDDIR)/test_cpu_vlan_restricted \
         $(BUILDDIR)/test_cpu_vlan_8372 \
         $(BUILDDIR)/test_nic_rx \
-        $(BUILDDIR)/test_lacp
+        $(BUILDDIR)/test_lacp \
+        $(BUILDDIR)/test_api
 
 # The table tests link the register mock and one environment file; stub/
 # stands in for the two headers a firmware build generates.
@@ -74,12 +75,18 @@ $(BUILDDIR)/test_page_json: test_page_json.c $(TABLE_ENV) hw_mock.h | $(BUILDDIR
 $(BUILDDIR)/test_lacp: test_lacp.c $(SRCROOT)/rtl837x_lacp.c $(SRCROOT)/timer.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+# api.c is compiled UNMODIFIED from the firmware tree.
+$(BUILDDIR)/test_api: test_api.c $(SRCROOT)/api.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
 # httpd/httpd.c and uip/uip.c are compiled UNMODIFIED from the firmware tree;
 # this test carries the environment below them itself.
 $(BUILDDIR)/test_httpd_tx: test_httpd_tx.c $(SRCROOT)/httpd/httpd.c $(SRCROOT)/uip/uip.c $(SRCROOT)/timer.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@ $(LDFLAGS)
 # the login sessions httpd.c calls into
 $(BUILDDIR)/test_httpd_tx: $(SRCROOT)/sessions.c
+# the bearer-token check of the API VLAN
+$(BUILDDIR)/test_httpd_tx: $(SRCROOT)/api.c
 
 # CPU VLAN initialization with full and reduced user-port ranges.
 $(BUILDDIR)/test_cpu_vlan_restricted: CFLAGS += -DMACHINE_MAX_PORT=7

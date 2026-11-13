@@ -50,6 +50,11 @@ state = {
     },
     "cmd_history": [],
     "mgmt_vlan": 1,
+    # Read-only monitoring API, see doc/api_vlan.md. The simulator has no
+    # VLANs: a request carrying an Authorization header stands for one that
+    # arrived in the API VLAN.
+    "api": {"enabled": False, "vlan": 0, "ip": "0.0.0.0", "netmask": "0.0.0.0",
+            "allow": "0.0.0.0", "token": ""},
     "lags": [
                 {"cfg":[],"aggValid":0,"agg":"000000000000","members":[]},
                 {"cfg":[5,6], "aggValid": 1, "agg": "ce654f01cb99", "members": [5]},
@@ -68,6 +73,26 @@ started = int(time.time())
 
 sessions = set()
 uploaded_config = None
+
+# What a client in the API VLAN may read: the JSON pages that change nothing
+API_READONLY = {
+    "/bandwidth.json", "/counters.json", "/eee.json", "/information.json",
+    "/isolation.json", "/l2.json", "/lldp.json", "/lag.json", "/mirror.json",
+    "/ports.json", "/traffic.json", "/storm.json", "/stp.json", "/stpcnt.json",
+    "/vlan.json", "/vlanlist.json",
+}
+
+
+def api_active():
+    a = state["api"]
+    if not (a["enabled"] and a["vlan"] and a["token"]):
+        return False
+    if a["vlan"] == (state["mgmt_vlan"] or 1):
+        return False
+    def num(s):
+        return sum(int(o) << (8 * (3 - i)) for i, o in enumerate(s.split(".")))
+    ip, mask, cl = num(a["ip"]), num(a["netmask"]), num(a["allow"])
+    return bool(ip and mask and cl) and (ip & mask) == (cl & mask) and ip != cl
 
 def vprint(string):
     if VERBOSE:
@@ -147,8 +172,31 @@ class Handler(SimpleHTTPRequestHandler):
         handler = self.api_handlers(query).get(path)
         return handler() if handler else {}
 
+    def _api_vlan_request(self):
+        """A request standing for one from the API VLAN: True if handled."""
+        if self.headers.get("Authorization") is None:
+            return False
+        if self.command != "GET":
+            self._send(405, b"", headers=(("Allow", "GET"),))
+            return True
+        a = state["api"]
+        scheme, _, token = self.headers["Authorization"].partition(" ")
+        if (not api_active() or scheme.lower() != "bearer"
+                or not secrets.compare_digest(token.strip(), a["token"])):
+            self._send(401, b"", headers=(("WWW-Authenticate", "Bearer"),))
+            return True
+        parsed = urlsplit(self.path)
+        path = unquote(parsed.path)
+        if path not in API_READONLY:
+            self._send(404, b"Not found\n")
+            return True
+        return self._json(self._api_response(path, parse_qs(parsed.query))) or True
+
     def do_GET(self):
         global uploaded_config
+
+        if self._api_vlan_request():
+            return
 
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
@@ -204,6 +252,9 @@ class Handler(SimpleHTTPRequestHandler):
         global uploaded_config, state
 
         path = urlsplit(self.path).path
+
+        if self._api_vlan_request():
+            return
 
         if path == "/login":
             form = self._read_urlencoded_form()
@@ -318,6 +369,7 @@ class Handler(SimpleHTTPRequestHandler):
             "vlan": self._parse_vlan,
             "lldp": self._parse_lldp,
             "pvid": self._parse_pvid,
+            "api": self._parse_api,
             "dns": self._parse_dns,
             "ntp": self._parse_ntp,
         }
@@ -367,6 +419,30 @@ class Handler(SimpleHTTPRequestHandler):
             state["vlans"][vid]["pvid"].append(machine_config["phys_to_log_port"][port-1])
         else :
             state["vlans"][vid] = self.newVlan("")
+
+    def _parse_api(self, pieces):
+        a = state["api"]
+        args = pieces[1:]
+        if not args:
+            return (f"API: {'enabled' if a['enabled'] else 'disabled'}, "
+                    f"{'active' if api_active() else 'not active'}").encode()
+        if args[0] in ("on", "off"):
+            a["enabled"] = args[0] == "on"
+        elif args[0] == "vlan" and len(args) == 2:
+            a["vlan"] = int(args[1])
+        elif args[0] == "ip" and len(args) == 3:
+            a["ip"], a["netmask"] = args[1], args[2]
+        elif args[0] == "allow" and len(args) == 2:
+            a["allow"] = args[1]
+        elif args[0] == "token" and len(args) == 1:
+            return f"API token: {a['token']}".encode() if a["token"] else b"No token set"
+        elif args[0] == "token" and args[1] == "new":
+            a["token"] = secrets.token_hex(16)
+            state["cmd_history"][-1] = "api token " + a["token"]
+            return f"New API token: {a['token']}".encode()
+        elif args[0] == "token" and re.fullmatch(r"[0-9a-f]{32}", args[1]):
+            a["token"] = args[1]
+        return None
 
     def _parse_lldp(self, pieces):
         global state
@@ -667,16 +743,27 @@ class Handler(SimpleHTTPRequestHandler):
             ]
 
     def _api_information(self):
+        a = state["api"]
         return {
             "ip_address":"192.168.10.247",
             "ip_gateway":"192.168.2.22",
             "ip_netmask":"255.255.255.0",
+            "syslog_server":"0.0.0.0:514",
+            "session_timeout":3600,
+            "api":{"enabled":a["enabled"],"active":api_active(),"vlan":a["vlan"],
+                   "ip":a["ip"],"netmask":a["netmask"],"allow":a["allow"],
+                   "token_set":bool(a["token"])},
             "ip_source":"static",
             "mac_address":"1c:2a:a3:23:00:02",
+            "hostname":"RTLPlayground-sim",
             "sw_ver":"0.1-sim",
+            "build_date":"2026-11-13 20:00:00",
             "uptime":f"0x{int(time.time()) - started:08x}",
             "hw_ver":"SWGT024-V2.0",
-            "pcb_ver":"PCB_SWTG024AS_A_V2_0_1_19650"
+            "pcb_ver":"PCB_SWTG024AS_A_V2_0_1_19650",
+            "chip_temp":f"{45 + secrets.randbelow(30) / 10:.1f} C",
+            "flash_size":"2 MB",
+            "sfp_slot_0":"OEM 10G-SFP+"
         }
 
     def _api_debug(self):
@@ -754,6 +841,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", default=8081, type=int, help="port to bind to (default 8081)")
     parser.add_argument("--bindaddr", default="127.0.0.1", help="address to bind (default 127.0.0.1)")
     parser.add_argument("--verbose", action="store_true", help="enable verbose output")
+    parser.add_argument("--api-token", default=None,
+                        help="enable the read-only API with this token (32 hex digits); "
+                             "requests with an Authorization header act as if from the API VLAN")
 
     args = parser.parse_args()
 
@@ -766,6 +856,10 @@ if __name__ == "__main__":
 
     HOST = args.bindaddr
     PORT = args.port
+
+    if args.api_token:
+        state["api"].update(enabled=True, vlan=20, ip="10.20.0.2", netmask="255.255.255.0",
+                            allow="10.20.0.10", token=args.api_token)
 
     print(f"Serving {ROOT} on http://{HOST}:{PORT}")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

@@ -4,6 +4,12 @@
 
 ## Added
 
+- Monitoring API
+  - Read-only monitoring API on a VLAN of its own: a second IPv4 address that
+    answers one allowed client, only with the read-only JSON pages and only with
+    a bearer token (`api vlan|ip|allow|token|on|off`, card "Monitoring API" in
+    the web UI). Meant for Home Assistant and similar. See `doc/api_vlan.md`.
+
 - Devices
   - Support the hongyavision HYWS-SGT0204S (PCB marking `2G5F4_10G2_V1.01`), an
     RTL8372 based 4x2.5G + 2xSFP+ unmanaged switch with a 512 KB Bright Moon

@@ -156,6 +156,8 @@ SRCS = \
 	ntp.c \
 	ntp_cli.c \
 	syslog.c \
+	api.c \
+	api_cli.c \
 	timer.c \
 	udp_apps.c \
 	crypto/chacha20.c

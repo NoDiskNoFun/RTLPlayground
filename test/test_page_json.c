@@ -220,6 +220,50 @@ static void t_status_counters(void)
 	CHECK(balanced(), "valid JSON");
 }
 
+#include "uip.h"
+#include "api.h"
+extern uip_ipaddr_t uip_hostaddr, uip_draddr, uip_netmask;
+
+/* Byte by byte: the address is in network order whatever the host is */
+static void setip(uint16_t *a, uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3)
+{
+	uint8_t *p = (uint8_t *)a;
+	p[0] = b0; p[1] = b1; p[2] = b2; p[3] = b3;
+}
+
+static void t_information_api(void)
+{
+	setip(uip_hostaddr, 192, 168, 2, 1);
+	setip(uip_netmask, 255, 255, 255, 0);
+	setip(uip_draddr, 192, 168, 2, 254);
+	memset(&api, 0, sizeof(api));
+	api.enabled = 1; api.active = 1; api.vlan = 20;
+	setip(api.ip, 10, 20, 0, 2);
+	setip(api.netmask, 255, 255, 255, 0);
+	setip(api.allow, 10, 20, 0, 10);
+	strcpy(api.token, "0123456789abcdef0123456789abcdef");
+
+	api_ctx = 0;
+	send_basic_info();
+	CHECK(balanced(), "information.json: valid nesting with the api object");
+	CHECK(has("\"api\":{\"enabled\":true,\"active\":true,\"vlan\":20,\"ip\":\"10.20.0.2\",\"netmask\":\"255.255.255.0\",\"allow\":\"10.20.0.10\",\"token_set\":true}"),
+	      "information.json: API settings reported");
+	CHECK(!has("0123456789abcdef0123456789abcdef"), "information.json: the token itself is never sent");
+	CHECK(has("\"ip_address\":\"192.168.2.1\""), "information.json: management address");
+
+	/* Asked through the API VLAN, uIP holds the API address for the moment */
+	memcpy(api_mgmt_host, uip_hostaddr, 4);
+	memcpy(api_mgmt_mask, uip_netmask, 4);
+	memcpy(api_mgmt_dr, uip_draddr, 4);
+	memcpy(uip_hostaddr, api.ip, 4);
+	api_ctx = 1;
+	send_basic_info();
+	CHECK(has("\"ip_address\":\"192.168.2.1\"") && has("\"ip_gateway\":\"192.168.2.254\""),
+	      "information.json via the API VLAN: still the management addressing");
+	api_ctx = 0;
+	memcpy(uip_hostaddr, api_mgmt_host, 4);
+}
+
 int main(void)
 {
 	printf("== httpd/page_impl.c JSON tests ==\n");
@@ -229,6 +273,7 @@ int main(void)
 	t_l2_page();
 	t_status_counters();
 	t_status_macs();
+	t_information_api();
 	printf("\n%d checks, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }

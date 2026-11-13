@@ -27,6 +27,7 @@
 #include "sessions.h"
 #include "dns.h"
 #include "ntp.h"
+#include "api.h"
 #include "uip/uip.h"
 #include "version.h"
 
@@ -490,8 +491,10 @@ void parse_mac_cmd(void)
 	// Swap the static management entry over to the new address: remove the
 	// old one (still in uip_ethaddr) before overwriting it.
 	port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, true);
+	api_l2_drop();
 	memcpy(uip_ethaddr.addr, mac_parse_result, 6);
 	port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, false);
+	api_update();
 
 	print_string("MAC set to: ");
 	print_mac(uip_ethaddr.addr);
@@ -639,8 +642,10 @@ void parse_vlan(void)
 				return;
 			}
 			port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, true);
+			api_l2_drop();
 			management_vlan = vlan_settings.vlan;
 			port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, false);
+			api_update();
 			if (dhcp_state.state != DHCP_OFF)
 				dhcp_start();
 			if (!vlan_settings.vlan)
@@ -1916,6 +1921,8 @@ void cmd_parser(void) __banked
 			parse_mtu();
 		} else if (cmd_compare(0, "syslog")) {
 			parse_syslog();
+		} else if (cmd_compare(0, "api")) {
+			api_parse();
 		} else if (cmd_compare(0, "dns")) {
 			dns_parse();
 		} else if (cmd_compare(0, "ntp") || cmd_compare(0, "time")) {

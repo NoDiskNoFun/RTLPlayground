@@ -29,6 +29,7 @@
 #include "rtl837x_flash.h"
 #include "page_impl.h"
 #include "html_data.h"
+#include "api.h"
 
 /* Private to uip.c, and the client needs them to build segments. */
 #define TCP_FIN 0x01
@@ -140,8 +141,10 @@ void print_string_newline_no_syslog(const char *p) { (void)p; }
 void set_sys_led_state(uint8_t state) { (void)state; }
 void cmd_parser(void) { }
 void execute_config(void) { }
-void execute_commands(uint8_t *p) { (void)p; }
-void clear_command_history(void) { }
+static unsigned execute_calls;
+void execute_commands(uint8_t *p) { (void)p; execute_calls++; }
+static unsigned history_clears;
+void clear_command_history(void) { history_clears++; }
 void udp_callbacks(void) { }
 void tcpip_output(void) { }
 void get_random_32(void) { }
@@ -172,25 +175,38 @@ bool strstart(const uint8_t *a, const uint8_t *b)
 
 bool strstart_x(const uint8_t *a, const uint8_t *b) { return strstart(a, b); }
 
+extern uint8_t outbuf[];
+extern uint16_t slen;
+
 bool send_counters(uint8_t phys_port) { (void)phys_port; return false; }
-void send_ports(void) { }
+void send_ports(void) { slen = strtox(outbuf, "HTTP/1.1 200 OK\r\n\r\n[\"ports\"]"); }
 void send_traffic(void) { }
 void send_vlan(uint16_t vlan) { (void)vlan; }
-void send_basic_info(void) { }
+void send_basic_info(void) { slen = strtox(outbuf, "HTTP/1.1 200 OK\r\n\r\n{\"info\":1}"); }
 void send_bandwidth(void) { }
 void send_storm(void) { }
 void send_isolation(void) { }
 void send_eee(void) { }
 void send_l2(uint16_t idx) { (void)idx; }
-void l2_delete(uint16_t idx) { (void)idx; }
+static unsigned l2_delete_calls;
+void l2_delete(uint16_t idx) { (void)idx; l2_delete_calls++; }
 void send_mirror(void) { }
-void send_config(void) { }
-void send_cmd_log(void) { }
+void send_config(void) { slen = strtox(outbuf, "HTTP/1.1 200 OK\r\n\r\nCONFIG"); }
+void send_cmd_log(void) { slen = strtox(outbuf, "HTTP/1.1 200 OK\r\n\r\nCMDLOG"); }
 void send_lag(void) { }
 void send_stp(void) { }
 void send_stp_counters(void) { }
 void send_vlanlist(void) { }
 void send_lldp(void) {}
+
+/* api.c, linked for the bearer-token check */
+uint16_t rx_packet_vlan;
+uint16_t management_vlan = 1;
+struct uip_eth_addr uip_ethaddr;
+void port_l2_static_mgmt(uint8_t *mac, uint16_t vlan, bool remove_entry)
+{
+	(void)mac; (void)vlan; (void)remove_entry;
+}
 
 extern uint8_t authenticated;
 extern char session_id[];
@@ -1293,6 +1309,178 @@ static void scenario_upload_broken_matches(void)
 	      "upload: repeated partial delimiters are staged as payload");
 }
 
+
+/* ---- the read-only API VLAN ---------------------------------------------- */
+
+#define API_TOKEN "0123456789abcdef0123456789abcdef"
+
+/* A connection as rtlplayground.c sets it up for a frame from the API VLAN:
+ * api_ctx is set while uIP handles the frame. */
+static void api_send(uint8_t flags, const char *payload, int plen)
+{
+	api_ctx = 1;
+	client_send(flags, payload, plen);
+	api_ctx = 0;
+}
+
+static void api_session_start(void)
+{
+	uip_init();
+	httpd_init();
+	api_init();
+	strcpy(api.token, API_TOKEN);
+	authenticated = 0;
+	execute_calls = 0;
+	l2_delete_calls = 0;
+	reset_calls = 0;
+	history_clears = 0;
+
+	cli_seq = 1000;
+	cli_rcv_nxt = 0;
+	cli_window = MSS_FULL;
+	stream_len = 0;
+	last_tx_len = 0;
+
+	api_send(TCP_SYN, NULL, 0);
+	api_send(TCP_ACK, NULL, 0);
+}
+
+static void api_get(const char *path, const char *auth)
+{
+	char req[512];
+
+	snprintf(req, sizeof(req), "GET %s HTTP/1.1\r\nHost: sw\r\n%s%s%s\r\n",
+		 path, auth ? "Authorization: " : "", auth ? auth : "", auth ? "\r\n" : "");
+	api_send(TCP_ACK | TCP_PSH, req, (int)strlen(req));
+	for (int i = 0; i < 4; i++) {
+		api_ctx = 1;
+		client_ack(MSS_FULL);
+		uip_periodic(0);
+		harvest();
+		api_ctx = 0;
+	}
+}
+
+static void scenario_api_reads_with_token(void)
+{
+	api_session_start();
+	CHECK(uip_conns[0].appstate.via_api == 1, "API: the connection remembers the API VLAN");
+	api_get("/information.json", "Bearer " API_TOKEN);
+	CHECK(stream_contains("HTTP/1.1 200 OK\r\n") && stream_contains("{\"info\":1}"),
+	      "API: information.json with the token is served");
+
+	api_session_start();
+	api_get("/ports.json", "bearer " API_TOKEN);
+	CHECK(stream_contains("[\"ports\"]"), "API: the scheme name is not case sensitive");
+}
+
+static void scenario_api_rejects_without_token(void)
+{
+	api_session_start();
+	api_get("/information.json", NULL);
+	CHECK(stream_contains("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\n"),
+	      "API: no token, 401 with a Bearer challenge");
+	CHECK(!stream_contains("{\"info\":1}"), "API: no token, no data");
+
+	api_session_start();
+	api_get("/information.json", "Bearer 0123456789abcdef0123456789abcdee");
+	CHECK(stream_contains("401 Unauthorized") && !stream_contains("{\"info\":1}"),
+	      "API: a token differing in the last digit is refused");
+
+	api_session_start();
+	api_get("/information.json", "Bearer " API_TOKEN "0");
+	CHECK(stream_contains("401 Unauthorized"), "API: a longer token is refused");
+
+	api_session_start();
+	api_get("/information.json", "Bearer 0123456789abcdef");
+	CHECK(stream_contains("401 Unauthorized"), "API: a shorter token is refused");
+
+	api_session_start();
+	api_get("/information.json", "Basic " API_TOKEN);
+	CHECK(stream_contains("401 Unauthorized"), "API: another scheme is refused");
+
+	api_session_start();
+	api.token[0] = 0;
+	api_get("/information.json", "Bearer ");
+	CHECK(stream_contains("401 Unauthorized"), "API: with no token configured nothing gets in");
+}
+
+static void scenario_api_ignores_session_cookie(void)
+{
+	char req[256];
+
+	api_session_start();
+	strcpy(session_id, "0123456789ab");
+	last_session_use[0] = fake_now;
+	snprintf(req, sizeof(req), "GET /information.json HTTP/1.1\r\nCookie: session=0123456789ab\r\n\r\n");
+	api_send(TCP_ACK | TCP_PSH, req, (int)strlen(req));
+	CHECK(stream_contains("401 Unauthorized") && !stream_contains("{\"info\":1}"),
+	      "API: a valid login cookie is no substitute for the token");
+	session_id[0] = 0;
+}
+
+static void scenario_api_is_read_only(void)
+{
+	static const char post[] =
+		"POST /cmd HTTP/1.1\r\n"
+		"Authorization: Bearer " API_TOKEN "\r\n"
+		"Content-Type: text/plain\r\n"
+		"Content-Length: 9\r\n"
+		"\r\n"
+		"reset now";
+	static const char *forbidden[] = {
+		"/config", "/cmd_log", "/cmd_log_clear", "/reset", "/l2_del.json?idx=1",
+		PROTECTED_FILE_NAME, FILE_NAME, "/upload",
+	};
+
+	api_session_start();
+	api_send(TCP_ACK | TCP_PSH, post, (int)strlen(post));
+	CHECK(stream_contains("HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\n"),
+	      "API: POST is refused with 405");
+	CHECK(execute_calls == 0, "API: a POSTed command is not executed");
+
+	for (unsigned i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
+		char name[96];
+
+		api_session_start();
+		api_get(forbidden[i], "Bearer " API_TOKEN);
+		snprintf(name, sizeof(name), "API: %s is not reachable, even with the token", forbidden[i]);
+		CHECK(stream_contains("HTTP/1.1 404 Not found\r\n") && !stream_contains("CONFIG")
+		      && !stream_contains("CMDLOG"), name);
+	}
+	CHECK(l2_delete_calls == 0 && reset_calls == 0 && history_clears == 0
+	      && uip_conns[0].appstate.fw_reset_pending == 0,
+	      "API: nothing was changed on the switch");
+}
+
+static void scenario_management_ignores_token(void)
+{
+	static const char get[] =
+		"GET /information.json HTTP/1.1\r\n"
+		"Authorization: Bearer " API_TOKEN "\r\n\r\n";
+
+	session_start(MSS_FULL);
+	strcpy(api.token, API_TOKEN);
+	client_send(TCP_ACK | TCP_PSH, get, (int)strlen(get));
+	CHECK(stream_contains("401 Unauthorized") && !stream_contains("{\"info\":1}"),
+	      "management: the API token is not a login");
+}
+
+static void scenario_api_connection_not_shared(void)
+{
+	static const char get[] = "GET /information.json HTTP/1.1\r\n\r\n";
+
+	/* Opened on the management side, a segment arrives from the API VLAN */
+	session_start(MSS_FULL);
+	api_send(TCP_ACK | TCP_PSH, get, (int)strlen(get));
+	CHECK(uip_conns[0].tcpstateflags == UIP_CLOSED, "a management connection is reset by an API segment");
+
+	/* And the other way round */
+	api_session_start();
+	client_send(TCP_ACK | TCP_PSH, get, (int)strlen(get));
+	CHECK(uip_conns[0].tcpstateflags == UIP_CLOSED, "an API connection is reset by a management segment");
+}
+
 int main(int argc, char **argv)
 {
 	if (argc > 1 && !strcmp(argv[1], "-v"))
@@ -1331,6 +1519,14 @@ int main(int argc, char **argv)
 
 	scenario_login_with_valid_cookie_reuses_its_slot();
 	scenario_login_without_cookie_replaces_least_recently_used();
+
+	printf("\n== httpd: read-only API VLAN ==\n");
+	scenario_api_reads_with_token();
+	scenario_api_rejects_without_token();
+	scenario_api_ignores_session_cookie();
+	scenario_api_is_read_only();
+	scenario_management_ignores_token();
+	scenario_api_connection_not_shared();
 
 	printf("\n%s (%d failure%s)\n",
 	       failures ? "BENCH: FAILURES" : "BENCH: ALL PASS",

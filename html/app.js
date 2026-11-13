@@ -289,6 +289,28 @@ var LANG = {
         sy_port: "Port",
         sy_sesstmo: "Session timeout (s)",
         sy_sesstmo_err: "Session timeout must be 1-65535 s",
+        api_title: "Monitoring API",
+        api_h: "read-only, own VLAN",
+        api_enable: "API enabled",
+        api_state: "State",
+        api_vlan: "VLAN",
+        api_allow: "Allowed client",
+        api_allow_p: "e.g. Home Assistant",
+        api_token: "Token",
+        api_new: "New token",
+        api_show: "Show token",
+        api_copy: "Copy",
+        api_note: "In this VLAN the switch answers only the allowed client, and only read-only JSON pages with the token (Authorization: Bearer). No web UI, no login, no changes. Save to flash to keep the settings.",
+        api_st_active: "active on {ip}, VLAN {vlan}",
+        api_st_incomplete: "enabled, but incomplete",
+        api_st_off: "off",
+        api_err_vlan: "API VLAN must be 1-4094 and differ from the management VLAN",
+        api_err_ip: "Invalid API address, netmask or client",
+        api_err_subnet: "The client must be on the API subnet (there is no gateway) and differ from the API address",
+        api_new_q: "Generate a new API token?",
+        api_new_d: "The old token stops working at once; Home Assistant needs the new one.",
+        api_copied: "Token copied",
+        api_notoken: "No token set",
         sy_services_note: "Service state reflects the startup config; runtime state is not readable.",
         sy_password: "Admin password",
         sy_newpw: "New password",
@@ -2104,6 +2126,28 @@ var LANG = {
         sy_port: "Port",
         sy_sesstmo: "Sitzungs-Timeout (s)",
         sy_sesstmo_err: "Sitzungs-Timeout muss zwischen 1 und 65535 s liegen",
+        api_title: "Monitoring-API",
+        api_h: "nur Lesen, eigenes VLAN",
+        api_enable: "API eingeschaltet",
+        api_state: "Status",
+        api_vlan: "VLAN",
+        api_allow: "Erlaubter Client",
+        api_allow_p: "z. B. Home Assistant",
+        api_token: "Token",
+        api_new: "Neues Token",
+        api_show: "Token anzeigen",
+        api_copy: "Kopieren",
+        api_note: "In diesem VLAN antwortet der Switch nur dem erlaubten Client und liefert nur lesende JSON-Seiten mit Token (Authorization: Bearer). Kein Webinterface, kein Login, keine Änderungen. Zum Behalten in den Flash speichern.",
+        api_st_active: "aktiv auf {ip}, VLAN {vlan}",
+        api_st_incomplete: "eingeschaltet, aber unvollständig",
+        api_st_off: "aus",
+        api_err_vlan: "Das API-VLAN muss 1-4094 sein und sich vom Management-VLAN unterscheiden",
+        api_err_ip: "Ungültige API-Adresse, Netzmaske oder Client-Adresse",
+        api_err_subnet: "Der Client muss im API-Subnetz liegen (es gibt kein Gateway) und sich von der API-Adresse unterscheiden",
+        api_new_q: "Neues API-Token erzeugen?",
+        api_new_d: "Das alte Token ist sofort ungültig; Home Assistant braucht dann das neue.",
+        api_copied: "Token kopiert",
+        api_notoken: "Kein Token gesetzt",
         sy_services_note: "Der Dienststatus entspricht der Startkonfiguration; der laufende Zustand ist nicht auslesbar.",
         sy_password: "Admin-Passwort",
         sy_newpw: "Neues Passwort",
@@ -2371,6 +2415,11 @@ var CONF_CMDS = [
     /^syslog\s+(on|off)$/,
     /^syslog\s+ip\s+(\d{1,3}\.){3}\d{1,3}$/,
     /^syslog\s+port\s+\d{1,5}$/,
+    /^api\s+(on|off)$/,
+    /^api\s+vlan\s+\d{1,4}$/,
+    /^api\s+ip\s+(\d{1,3}\.){3}\d{1,3}\s+(\d{1,3}\.){3}\d{1,3}$/,
+    /^api\s+allow\s+(\d{1,3}\.){3}\d{1,3}$/,
+    /^api\s+token\s+[0-9a-f]{32}$/,
     /^session\s+\d{1,5}$/,
     /^dns\s+server\s+(\d{1,3}\.){3}\d{1,3}(\s+(\d{1,3}\.){3}\d{1,3})?$/,
     /^ntp\s+(on|off)$/,
@@ -4705,6 +4754,7 @@ function sysLoad() {
         if (sl[0] && sl[0] !== "0.0.0.0") $("sy-sysip").value = sl[0];
         if (sl[1]) $("sy-sysport").value = sl[1];
         if (S.info.session_timeout) $("sy-sesstmo").value = S.info.session_timeout;
+        apiLoad();
     }).catch(function() {});
     cfgReload();
     dnsLoad();
@@ -4816,6 +4866,102 @@ $("sy-syslog").addEventListener("change", function() {
         cmds.push("syslog on");
     } else cmds.push("syslog off");
     postCmds(cmds).catch(function() {});
+});
+/* ---- read-only monitoring API on its own VLAN ---- */
+function apiLoad() {
+    var a = S.info.api;
+    if (!a) {
+        $("sy-apicard").style.display = "none";
+        return;
+    }
+    $("sy-api").checked = !!a.enabled;
+    $("sy-apistate").textContent = a.active ? t("api_st_active", {
+        ip: a.ip,
+        vlan: a.vlan
+    }) : a.enabled ? t("api_st_incomplete") : t("api_st_off");
+    $("sy-apivlan").value = a.vlan || "";
+    $("sy-apiip").value = a.ip !== "0.0.0.0" ? a.ip : "";
+    $("sy-apimask").value = a.netmask !== "0.0.0.0" ? a.netmask : "";
+    $("sy-apiallow").value = a.allow !== "0.0.0.0" ? a.allow : "";
+    /* A token shown on request stays visible until the page reloads */
+    var tok = $("sy-apitoken");
+    if (!a.token_set) tok.value = "";
+    else if (!/^[0-9a-f]{32}$/.test(tok.value)) tok.value = "\u2022".repeat(32);
+    $("sy-apitoken").placeholder = a.token_set ? "" : t("api_notoken");
+}
+
+function ipNum(s) {
+    return s.split(".").reduce(function(n, o) {
+        return n * 256 + (+o)
+    }, 0);
+}
+
+function apiShowToken(body) {
+    var m = (body || "").match(/[0-9a-f]{32}/);
+    if (m) $("sy-apitoken").value = m[0];
+    return m ? m[0] : "";
+}
+$("sy-api").addEventListener("change", function() {
+    var el = this;
+    postCmd("api " + (el.checked ? "on" : "off")).then(sysLoad).catch(function() {
+        el.checked = !el.checked
+    });
+});
+$("sy-apiapply").addEventListener("click", function() {
+    var v = +$("sy-apivlan").value,
+        ip = $("sy-apiip").value.trim(),
+        mask = $("sy-apimask").value.trim(),
+        cl = $("sy-apiallow").value.trim();
+    if (!(v >= 1 && v <= 4094)) {
+        toast(t("api_err_vlan"), "err");
+        return;
+    }
+    if (!okIp(ip) || !okIp(mask) || !okIp(cl)) {
+        toast(t("api_err_ip"), "err");
+        return;
+    }
+    var m = ipNum(mask);
+    if (Math.floor(ipNum(ip) / (4294967296 - m)) !== Math.floor(ipNum(cl) / (4294967296 - m)) || ip === cl) {
+        toast(t("api_err_subnet"), "err");
+        return;
+    }
+    postCmds(["api vlan " + v, "api ip " + ip + " " + mask, "api allow " + cl]).then(sysLoad).catch(function() {});
+});
+$("sy-apinew").addEventListener("click", function() {
+    confirmModal(t("api_new_q"), t("api_new_d"), function() {
+        postCmd("api token new", true).then(function(r) {
+            apiShowToken(r.body);
+            setDirty(true);
+            sysLoad();
+        }).catch(function() {});
+    });
+});
+$("sy-apishow").addEventListener("click", function() {
+    api("/cmd", {
+        method: "POST",
+        body: "api token"
+    }).then(function(r) {
+        if (!apiShowToken(r.body)) toast(t("api_notoken"), "err");
+    }).catch(function() {});
+});
+$("sy-apicopy").addEventListener("click", function() {
+    var el = $("sy-apitoken");
+    if (!/^[0-9a-f]{32}$/.test(el.value)) {
+        $("sy-apishow").click();
+        return;
+    }
+    function done() {
+        toast(t("api_copied"), "ok")
+    }
+    /* navigator.clipboard needs a secure context, which plain HTTP is not */
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(el.value).then(done).catch(function() {});
+        return;
+    }
+    el.select();
+    try {
+        if (document.execCommand("copy")) done();
+    } catch (e) {}
 });
 $("sy-sesstmo").addEventListener("change", function() {
     var v = +this.value;
@@ -5011,7 +5157,7 @@ tabHooks.system = {
 
 var CONF_OVERWRITE = [
     /^ip\b/, /^gw\b/, /^netmask\b/, /^hostname\b/,
-    /^syslog\s+ip\b/, /^syslog\s+port\b/, /^dns\s+server\b/, /^passwd\b/, /^session\b/,
+    /^syslog\s+ip\b/, /^syslog\s+port\b/, /^api\s+(vlan|ip|allow|token)\b/, /^dns\s+server\b/, /^passwd\b/, /^session\b/,
     /^ntp\s+server\b/, /^ntp\s+interval\b/, /^ntp\s+timezone\b/, /^ntp\s+dst\b/,
     /^vlan\s+\d{1,4}\s+mgmt$/, /^vlan\s+\d{1,4}(?!\s+mgmt\b)/,
     /^pvid\s+\d{1,2}\b/,
@@ -5022,7 +5168,7 @@ var CONF_OVERWRITE = [
     /^stp\s+(port\s+\d{1,2}|lag\s+[1-4])\s+(edge|cost|prio|guard|filter|p2p)\b/,
     /^igmp\b/, /^mtu\s+\d{1,2}\b/, /^storm\s+\d{1,2}\s+(bcast|mcast|ucast|umcast)\b/,
 ];
-var CONF_TOGGLE = [/^(syslog)\s+(on|off)$/, /^(ntp)\s+(on|off)$/, /^(stp)\s+(on|off)$/, /^(lldp)\s+(on|off)$/, /^(stp\s+(port\s+\d{1,2}|lag\s+[1-4]))\s+(on|off)$/];
+var CONF_TOGGLE = [/^(syslog)\s+(on|off)$/, /^(api)\s+(on|off)$/, /^(ntp)\s+(on|off)$/, /^(stp)\s+(on|off)$/, /^(lldp)\s+(on|off)$/, /^(stp\s+(port\s+\d{1,2}|lag\s+[1-4]))\s+(on|off)$/];
 
 function mergeConf(base, texts) {
     var conf = base.slice();

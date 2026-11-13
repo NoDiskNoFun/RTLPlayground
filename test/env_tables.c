@@ -93,6 +93,13 @@ uint16_t lldp_logical_port_status;
 
 
 uip_ipaddr_t uip_hostaddr, uip_draddr, uip_netmask;
+
+/* The read-only API VLAN as information.json reports it; api.c itself is
+ * covered by test_api */
+#include "api.h"
+struct api_state api;
+uint8_t api_ctx;
+uip_ipaddr_t api_mgmt_host, api_mgmt_mask, api_mgmt_dr;
 struct uip_eth_addr uip_ethaddr = { .addr = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 } };
 
 /* ---- leaf calls into subsystems not under test ---- */

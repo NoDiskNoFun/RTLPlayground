@@ -35,6 +35,7 @@
 #include "httpd/page_impl.h"
 #include "boot.h"
 #include "sfp.h"
+#include "api.h"
 
 extern __code const struct machine machine;
 extern __xdata uint32_t flash_size;
@@ -888,9 +889,11 @@ void tcpip_output(void)
 	FRAME->reserved_2[0] = 0x00; FRAME->reserved_2[1] = 0x00;
 
 	// For the management VLAN we insert an 802.1Q VLAN tag, but never into a
-	// CPU-tagged frame, where the ASIC expects its tag right behind the addresses
+	// CPU-tagged frame, where the ASIC expects its tag right behind the addresses.
+	// What the stack sends on behalf of the API VLAN carries that VLAN instead.
+	__xdata uint16_t tx_vlan = api_ctx ? api.vlan : management_vlan;
 	frame_tagged = false;
-	if (management_vlan && FRAME_ETHERTYPE != HTONS(RTL_FRAME_TAG_ID)) {
+	if (tx_vlan && FRAME_ETHERTYPE != HTONS(RTL_FRAME_TAG_ID)) {
 		frame_tagged = true;
 		// Shift the ethernet header before the HW type including the rtl_frame_desc to the beginning of uip_buf
 		// to allow space to insert the dot 1Q tag
@@ -898,7 +901,7 @@ void tcpip_output(void)
 			uip_buf[i] = uip_buf[i + DOT_1Q_TAG_SIZE];
 		FRAME_Q->len += DOT_1Q_TAG_SIZE;
 		FRAME_Q->tpid = HTONS(0x8100);  // Change ether-type to Dot1Q
-		FRAME_Q->tci = HTONS(management_vlan);
+		FRAME_Q->tci = HTONS(tx_vlan);
 	}
 
 	reg_read_m(RTL837X_REG_CPU_TX_CURR_PKT);
@@ -989,12 +992,36 @@ void handle_rx(void)
 				tcpip_output();
 			}
 		} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
-			uip_arp_arpin();
-			if (uip_len) {
-			    tcpip_output();
+			if (api_rx_vlan()) {
+				// API VLAN: only the API address, only to its client
+				if (api_arp_accept()) {
+					api_ctx_enter();
+					uip_arp_arpin();
+					if (uip_len)
+						tcpip_output();
+					api_ctx_leave();
+				}
+			} else {
+				uip_arp_arpin();
+				if (uip_len) {
+				    tcpip_output();
+				}
 			}
 		} else if (ETH_IN->ether_type == HTONS(0x0800)) { // IPv4
-			if (!management_vlan || management_vlan == rx_packet_vlan) {
+			if (api_rx_vlan()) {
+				// API VLAN: the client, TCP port 80 and ping only;
+				// everything else is dropped without an answer
+				if (api_ip_accept()) {
+					api_ctx_enter();
+					uip_arp_ipin();
+					uip_input();
+					if (uip_len) {
+						uip_arp_out();
+						tcpip_output();
+					}
+					api_ctx_leave();
+				}
+			} else if (!management_vlan || management_vlan == rx_packet_vlan) {
 				uip_arp_ipin();
 				uip_input();
 				if (uip_len) {
@@ -1015,6 +1042,10 @@ void handle_rx(void)
 void handle_tx(void)
 {
 	for(uint8_t i = 0; i < UIP_CONNS; i++) {
+		// A connection opened from the API VLAN keeps answering there
+		__xdata uint8_t via_api = uip_conns[i].appstate.via_api;
+		if (via_api)
+			api_ctx_enter();
 		uip_periodic(i);
 		if(uip_len > 0) {
 #ifdef RXTXDBG
@@ -1023,6 +1054,8 @@ void handle_tx(void)
 			uip_arp_out();
 			tcpip_output();
 		}
+		if (via_api)
+			api_ctx_leave();
 	}
 	for(uint8_t i = 0; i < UIP_UDP_CONNS; i++) {
 		uip_udp_periodic(i);
@@ -1720,6 +1753,7 @@ void main(void)
 	uip_init();
 	uip_arp_init();
 	httpd_init();
+	api_init();
 	lldp_init();
 
 	management_vlan = 1; // Default management VLAN is 1
@@ -1742,6 +1776,7 @@ void main(void)
 	execute_config();
 	// After the config so the entry lands in the final management VLAN
 	port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, false);
+	api_update();
 	/* After the config: a name from it wins, otherwise derive one. */
 	set_hostname_default();
 	print_cmd_prompt();

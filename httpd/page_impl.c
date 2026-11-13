@@ -18,6 +18,7 @@
 #include "page_impl.h"
 #include "syslog.h"
 #include "dhcp.h"
+#include "api.h"
 
 // #define DEBUG
 #include "debug.h"
@@ -209,25 +210,28 @@ void sfp_send_data(uint8_t slot, uint8_t reg, uint8_t len)
 }
 
 
+/* An address held as uip_ipaddr_t, in dotted notation */
+static void ipaddr_to_html(__xdata uint16_t *a)
+{
+	itoa_html(a[0]); char_to_html('.');
+	itoa_html(a[0] >> 8); char_to_html('.');
+	itoa_html(a[1]); char_to_html('.');
+	itoa_html(a[1] >> 8);
+}
+
+
 void send_basic_info(void)
 {
 	slen = strtox(outbuf, HTTP_RESPONSE_JSON);
 	dbg_string("send_basic_info called\n");
+	/* The management addressing, also when asked through the API VLAN,
+	 * where uIP runs on the API address for the moment */
 	str_code_to_html("{" JSONQUOTE("ip_address") ":\"");
-	itoa_html(uip_hostaddr[0]); char_to_html('.');
-	itoa_html(uip_hostaddr[0] >> 8); char_to_html('.');
-	itoa_html(uip_hostaddr[1]); char_to_html('.');
-	itoa_html(uip_hostaddr[1] >> 8);
+	ipaddr_to_html(api_ctx ? api_mgmt_host : uip_hostaddr);
 	str_code_to_html("\"," JSONQUOTE("ip_gateway") ":\"");
-	itoa_html(uip_draddr[0]); char_to_html('.');
-	itoa_html(uip_draddr[0] >> 8); char_to_html('.');
-	itoa_html(uip_draddr[1]); char_to_html('.');
-	itoa_html(uip_draddr[1] >> 8);
+	ipaddr_to_html(api_ctx ? api_mgmt_dr : uip_draddr);
 	str_code_to_html("\"," JSONQUOTE("ip_netmask") ":\"");
-	itoa_html(uip_netmask[0]); char_to_html('.');
-	itoa_html(uip_netmask[0] >> 8); char_to_html('.');
-	itoa_html(uip_netmask[1]); char_to_html('.');
-	itoa_html(uip_netmask[1] >> 8);
+	ipaddr_to_html(api_ctx ? api_mgmt_mask : uip_netmask);
 	str_code_to_html("\"," JSONQUOTE("syslog_server") ":\"");
 	itoa_html(syslog_state.server_ip[0]); char_to_html('.');
 	itoa_html(syslog_state.server_ip[1]); char_to_html('.');
@@ -236,6 +240,22 @@ void send_basic_info(void)
 	itoa16_html(syslog_state.server_port);
 	str_code_to_html("\"," JSONQUOTE("session_timeout") ":");
 	itoa16_html(session_timeout);
+	/* The API settings, never the token itself */
+	str_code_to_html("," JSONQUOTE("api") ":{" JSONQUOTE("enabled") ":");
+	str_code_to_html(api.enabled ? "true" : "false");
+	str_code_to_html("," JSONQUOTE("active") ":");
+	str_code_to_html(api.active ? "true" : "false");
+	str_code_to_html("," JSONQUOTE("vlan") ":");
+	itoa16_html(api.vlan);
+	str_code_to_html("," JSONQUOTE("ip") ":\"");
+	ipaddr_to_html(api.ip);
+	str_code_to_html("\"," JSONQUOTE("netmask") ":\"");
+	ipaddr_to_html(api.netmask);
+	str_code_to_html("\"," JSONQUOTE("allow") ":\"");
+	ipaddr_to_html(api.allow);
+	str_code_to_html("\"," JSONQUOTE("token_set") ":");
+	str_code_to_html(api.token[0] ? "true" : "false");
+	char_to_html('}');
 	slen += strtox(outbuf + slen, dhcp_state.state == DHCP_OFF ? ("," JSONQUOTE("ip_source") ":" JSONQUOTE("static")) : ("," JSONQUOTE("ip_source") ":" JSONQUOTE("dhcp")));
 	slen += strtox(outbuf + slen, "," JSONQUOTE("mac_address") ":\"");
 	byte_to_html(uip_ethaddr.addr[0]); char_to_html(':');

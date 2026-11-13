@@ -4,6 +4,9 @@ The switch firmware implements a JSON API which underpins the webUI.
 Port numbers referred to throughout the API are physical port numbers
 and should reflect the physical numbers visible on the switch.
 
+The read-only endpoints can also be reached from a separate monitoring VLAN
+with a bearer token, see [Read-only monitoring API](api_vlan.md).
+
 The following endpoints are supported:
  * /bandwidth.json
  * /counters.json?port=<PORTNUM>
@@ -169,6 +172,7 @@ Array of ports EEE configuration and status
 | `chip_temp` | Temperature of the chipset
 | `flash_size` | Size of the firmware flash
 | `sfp_slot_0` | Descriptor of the module in the first SFP slot
+| `api` | Settings of the [read-only monitoring API](api_vlan.md): `enabled`, `active`, `vlan`, `ip`, `netmask`, `allow`, `token_set` (the token itself is never reported)
 
 
 ## isolation

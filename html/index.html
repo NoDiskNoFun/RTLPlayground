@@ -436,6 +436,23 @@ button.danger{background:var(--bad);color:#fff;border-color:transparent}
             <input class="in" id="sy-sesstmo" style="width:80px" type="number" min="1" max="65535"></label>
           <p class="small mut" data-i18n="sy_services_note">Service state reflects the startup config; runtime state is not readable.</p>
         </div>
+        <div class="card" id="sy-apicard"><h2><span data-i18n="api_title">Monitoring API</span> <span class="hint" data-i18n="api_h">read-only, own VLAN</span></h2>
+          <label class="row" style="justify-content:space-between"><span data-i18n="api_enable">API enabled</span>
+            <span class="switch"><input type="checkbox" id="sy-api"><i></i></span></label>
+          <label class="row"><span class="lb" data-i18n="api_state">State</span><span id="sy-apistate">-</span></label>
+          <label class="row"><span class="lb" data-i18n="api_vlan">VLAN</span><input class="in sm" id="sy-apivlan" type="number" min="1" max="4094"></label>
+          <label class="row"><span class="lb" data-i18n="i_ip">IP address</span><input class="in" id="sy-apiip" size="15"></label>
+          <label class="row"><span class="lb" data-i18n="i_mask">Netmask</span><input class="in" id="sy-apimask" size="15"></label>
+          <label class="row"><span class="lb" data-i18n="api_allow">Allowed client</span><input class="in" id="sy-apiallow" size="15" data-i18n-p="api_allow_p"></label>
+          <label class="row"><span class="lb" data-i18n="api_token">Token</span><input class="in mono" id="sy-apitoken" readonly spellcheck="false" style="flex:1;min-width:0"></label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+            <button class="ctl pri" id="sy-apiapply" data-i18n="c_apply">Apply</button>
+            <button class="ctl" id="sy-apinew" data-i18n="api_new">New token</button>
+            <button class="ctl" id="sy-apishow" data-i18n="api_show">Show token</button>
+            <button class="ctl" id="sy-apicopy" data-i18n="api_copy">Copy</button>
+          </div>
+          <p class="small mut" style="margin-top:8px" data-i18n="api_note">In this VLAN the switch answers only the allowed client, and only read-only JSON pages with the token (Authorization: Bearer). No web UI, no login, no changes. Save to flash to keep the settings.</p>
+        </div>
         <div class="card" id="sy-ntpcard"><h2 data-i18n="sy_time">Time</h2>
           <label class="row" style="justify-content:space-between"><span data-i18n="sy_ntp">NTP</span>
             <span class="switch"><input type="checkbox" id="sy-ntp"><i></i></span></label>
